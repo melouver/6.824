@@ -2,6 +2,12 @@ package mapreduce
 
 import (
 	"hash/fnv"
+	"encoding/json"
+	"os"
+	"fmt"
+	"bufio"
+	"io/ioutil"
+
 )
 
 func doMap(
@@ -53,6 +59,42 @@ func doMap(
 	//
 	// Your code here (Part I).
 	//
+	buf, _ := ioutil.ReadFile(inFile)
+	s := string(buf)
+	kvs := mapF(inFile, s)
+	encs := make([]*json.Encoder, nReduce)
+	files := make([]*os.File, nReduce)
+	ws := make([]*bufio.Writer, nReduce)
+	var e error
+	//打开R个文件以供encode
+	for i := 0; i < nReduce; i++ {
+		files[i], e = os.Create(reduceName(jobName, mapTask, i))
+		if e != nil {
+			fmt.Printf("error in open nReduce files!" + e.Error())
+			return
+		}
+		ws[i] = bufio.NewWriter(files[i])
+		encs[i] = json.NewEncoder(ws[i])
+	}
+	// encode每个kv，k为原数字，v为""
+	for _ , kv := range kvs {
+		e = encs[ihash(kv.Key)%nReduce].Encode(&kv)
+		debug("encoding key: %s\n", kv.Key)
+		if e != nil {
+			fmt.Printf("error in encode to reduce file!" + e.Error())
+			return
+		}
+	}
+
+	for _, w := range ws {
+		w.Flush()
+	}
+
+	// close all file
+	for _, f := range files {
+		f.Close()
+	}
+
 }
 
 func ihash(s string) int {

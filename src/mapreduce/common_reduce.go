@@ -1,5 +1,13 @@
 package mapreduce
 
+import (
+	"encoding/json"
+	"bufio"
+	"os"
+	"fmt"
+	"sort"
+)
+
 func doReduce(
 	jobName string, // the name of the whole MapReduce job
 	reduceTask int, // which reduce task this is
@@ -44,4 +52,61 @@ func doReduce(
 	//
 	// Your code here (Part I).
 	//
+
+	var kvs[]KeyValue
+	// 从所有map的结果中提取出所有kv对
+	for i := 0; i < nMap; i++ {
+		fs := reduceName(jobName, i, reduceTask)
+		f, e := os.Open(fs)
+		if e != nil {
+			fmt.Printf("error in open map file" + e.Error())
+			panic(e)
+			return
+		}
+		r := bufio.NewReader(f)
+		dec := json.NewDecoder(r)
+
+		for {
+			var kv KeyValue
+			e = dec.Decode(&kv)
+			if e != nil {
+				break;
+			}
+			kvs = append(kvs, kv)
+		}
+	}
+
+	//排序，相同的key会排在一起
+	sort.Slice(kvs, func(i, j int) bool {
+		return kvs[i].Key < kvs[j].Key
+	})
+	var values[]string
+	var retkvs[]KeyValue
+	last := kvs[0].Key
+	//把相同的key的value组在一起，传给reduceF
+	for _, kv := range kvs {
+		if kv.Key == last {
+			values = append(values, kv.Value)
+		} else {
+			retkvs = append(retkvs,
+				KeyValue{last, reduceF(last, values)})
+			last = kv.Key
+			values = nil
+			values = append(values, kv.Value)
+		}
+	}
+	// 为了末尾的key
+	retkvs = append(retkvs,
+		KeyValue{last, reduceF(last, values)})
+
+	f, e := os.Create(outFile)
+	if e != nil {
+		panic(e)
+	}
+	enc := json.NewEncoder(f)
+	for _, p := range retkvs {
+		enc.Encode(p)
+	}
+	f.Close()
+
 }
