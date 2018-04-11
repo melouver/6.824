@@ -47,7 +47,9 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 				nil) // may return false indicating failure
 			}
 			wg.Done()
-			registerChan <- workerAddr
+			go func() {
+				registerChan <- workerAddr
+			}()
 		}(i)
 	}
  	wg.Wait()
