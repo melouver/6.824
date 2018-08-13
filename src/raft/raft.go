@@ -415,15 +415,24 @@ func (rf *Raft) throwrand() {
 func sendRVRPC(rf *Raft, args *RequestVoteArgs) {
 	for {
 		rf.mu.Lock()
+
+
 		DPrintf("%d wait for next round of RV RPC\n", rf.me)
 		for rf.shouldCont == 0 { // 0: wait
 			DPrintf("%d begin wait\n", rf.me)
 			rf.contCond.Wait()
 		}
+
+		args.Term = rf.currentTerm
+		args.CandidateId = rf.me
+		args.LastLogIndex = rf.log[len(rf.log)-1].CommandIndex
+		args.LastLogTerm = rf.log[len(rf.log)-1].Term
+
 		DPrintf("%d should cont\n", rf.me)
 
 		if rf.state == Candidate {
 			DPrintf("%d begin new round of RV RPC with term %d args: %v\n", rf.me, rf.currentTerm, args)
+			lastCurTerm :=  rf.currentTerm
 			rf.mu.Unlock()
 			wg := sync.WaitGroup{}
 
@@ -453,6 +462,13 @@ func sendRVRPC(rf *Raft, args *RequestVoteArgs) {
 						}
 
 						rf.mu.Lock()
+						if rf.currentTerm != lastCurTerm {
+							rf.mu.Unlock()
+							wg.Done()
+							DPrintf("%d currentTerm changed since RV %d\n", rf.me, idx)
+							return
+						}
+
 						if reply.Term > rf.currentTerm { // Rules for all servers
 							rf.currentTerm = reply.Term
 							if rf.state == Candidate {
@@ -589,6 +605,14 @@ func sendPeriodHeartBeat2(rf *Raft) {
 
 					DPrintf("leader%d heartbeat to %d RPC returned\n", rf.me, idx)
 					rf.mu.Lock()
+
+					if curTerm != rf.currentTerm {
+						rf.mu.Unlock()
+						wg.Done()
+						DPrintf("%d currentTerm changed since RV %d\n", rf.me, idx)
+						return
+					}
+
 					if reply.Term > rf.currentTerm {
 						rf.currentTerm = reply.Term
 						rf.state = Follower
@@ -719,7 +743,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			case Candidate:
 				rf.mu.Lock()
 				DPrintf("server %d begin election\n", rf.me)
-				rf.currentTerm = rf.currentTerm + 1
+				rf.currentTerm +=  1
 				rf.votes = 1
 				rf.votedFor = rf.me
 				rf.timer.Reset(rf.electionTimeout)
