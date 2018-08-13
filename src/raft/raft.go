@@ -87,9 +87,11 @@ type Raft struct {
 	debugFlag       bool
 	timer           *time.Timer
 	winElectionCh   chan bool
-	shouldContCh    chan bool
+	shouldCont      int // 0: wait | 1: cont
+	contCond        *sync.Cond
 	randDevice      *rand.Rand
 	electionTimeout time.Duration
+	rvArgs          RequestVoteArgs
 }
 
 type LogEntry struct {
@@ -183,8 +185,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reason := ""
 	reply.Term = rf.currentTerm
 	reply.VoteGranted = false
+
 	if rf.currentTerm < args.Term { // Rules for all servers
 		rf.currentTerm = args.Term
+		if rf.state == Candidate {
+			rf.state = Follower
+			rf.winElectionCh <- false
+		}
 		rf.state = Follower
 		rf.votedFor = -1
 	}
@@ -260,12 +267,22 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.Term = rf.currentTerm
 	reply.Success = true
 
+	if args.Term > rf.currentTerm { // Rules for all servers
+		rf.currentTerm = args.Term
+		if rf.state == Candidate {
+			rf.state = Follower
+			DPrintf("%d send false to winCh\n", rf.me)
+			rf.winElectionCh <- false
+		}
+		rf.state = Follower
+		rf.votes = 0
+		rf.votedFor = -1
+	}
+
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
 	}
-
-	rf.currentTerm = args.Term // Rules for all servers
 
 	if len(args.Entries) == 0 {
 		DPrintf("%d got heartbeat from leader%d\n", rf.me, args.LeaderId)
@@ -274,16 +291,6 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 
 	DPrintf("%d back to follower cause of leader%d leader's term:%d \n", rf.me, args.LeaderId, args.Term)
-
-	if rf.state == Candidate {
-		rf.state = Follower
-		DPrintf("%d send false to winCh\n", rf.me)
-		rf.winElectionCh <- false
-	}
-
-	rf.state = Follower
-	rf.votes = 0
-	rf.votedFor = -1
 
 	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
@@ -407,79 +414,98 @@ func (rf *Raft) throwrand() {
 
 func sendRVRPC(rf *Raft, args *RequestVoteArgs) {
 	for {
+		rf.mu.Lock()
 		DPrintf("%d wait for next round of RV RPC\n", rf.me)
-		shouldContinue := <-rf.shouldContCh
-		if shouldContinue {
-			rf.mu.Lock()
-			if rf.state == Candidate {
-				DPrintf("%d begin new round of RV RPC with term %d\n", rf.me, rf.currentTerm)
-				rf.mu.Unlock()
-				wg := sync.WaitGroup{}
-				wg.Add(len(rf.peers) - 1)
-				for i := 0; i < len(rf.peers); i++ {
-					if i != rf.me {
-						go func(idx int) {
-							reply := &RequestVoteReply{}
-							DPrintf("%d send RV to %d\n", rf.me, idx)
-							if ok := rf.sendRequestVote(idx, args, reply); ok && reply.VoteGranted {
-								rf.mu.Lock()
-								if rf.state == Candidate {
-									rf.votes++
-									DPrintf("-------server %d got vote from server %d now has %d votes\n", rf.me, idx, rf.votes)
-									if rf.votes > len(rf.peers)/2 {
-										DPrintf("%d win election\n", rf.me)
-										rf.state = Leader
-										DPrintf("sending true in win channel\n")
-										rf.winElectionCh <- true
-										rf.mu.Unlock()
-										wg.Done()
-										DPrintf("%d become leader.QUIT\n", rf.me)
-										return
-									}
-								} else {
-									DPrintf("-------server %d state: %v got vote from server %d BUT IGNORE IT current votes: %d\n", rf.me, rf.state, idx, rf.votes)
-								}
-								rf.mu.Unlock()
-							} else {
-								rf.mu.Lock()
-								if reply.Term > rf.currentTerm {
-
-									rf.currentTerm = reply.Term
-									rf.state = Follower
-									rf.votes = 0
-									rf.votedFor = -1
-									rf.timer.Reset(rf.electionTimeout)
-
-									DPrintf("%d back to follower cause receive reply with Term %d but current term is %d\n", rf.me, reply.Term, rf.currentTerm)
-								}
-								rf.mu.Unlock()
-							}
-							wg.Done()
-						}(i)
-					}
-				}
-				wg.Wait()
-
-				rf.mu.Lock()
-				if rf.state == Candidate && rf.votes > len(rf.peers)/2 {
-					DPrintf("%d win election\n", rf.me)
-					rf.state = Leader
-					DPrintf("sending true in win channel\n")
-					rf.winElectionCh <- true
-					rf.mu.Unlock()
-					DPrintf("%d become leader.QUIT\n", rf.me)
-					return
-				}
-				rf.mu.Unlock()
-			} else {
-				rf.mu.Unlock()
-				DPrintf("%d is no longer candidate.QUIT\n", rf.me)
-				return
-			}
-		} else {
-			DPrintf("%d receive false shouldCont so QUIT\n", rf.me)
-			return
+		for rf.shouldCont == 0 { // 0: wait
+			DPrintf("%d begin wait\n", rf.me)
+			rf.contCond.Wait()
 		}
+		DPrintf("%d should cont\n", rf.me)
+
+		if rf.state == Candidate {
+			DPrintf("%d begin new round of RV RPC with term %d args: %v\n", rf.me, rf.currentTerm, args)
+			rf.mu.Unlock()
+			wg := sync.WaitGroup{}
+
+			for i := 0; i < len(rf.peers); i++ {
+				if i != rf.me {
+					wg.Add(1)
+					go func(idx int) {
+						reply := &RequestVoteReply{}
+						DPrintf("%d send RV to %d\n", rf.me, idx)
+
+						c := make(chan bool)
+
+						go func() {
+							ok := rf.sendRequestVote(idx, args, reply)
+							c <- ok
+						}()
+
+						go func() {
+							time.Sleep(rpcTimeOut)
+							c <- false
+						}()
+
+						if ok := <-c; !ok {
+							wg.Done()
+							DPrintf("%d to %d rv RPC timeout\n", rf.me, idx)
+							return
+						}
+
+						rf.mu.Lock()
+						if reply.Term > rf.currentTerm { // Rules for all servers
+							rf.currentTerm = reply.Term
+							if rf.state == Candidate {
+								rf.state = Follower
+								DPrintf("%d send false to winCh\n", rf.me)
+								rf.winElectionCh <- false
+							}
+							rf.state = Follower
+							rf.votes = 0
+							rf.votedFor = -1
+							wg.Done()
+							rf.mu.Unlock()
+							DPrintf("%d back to follower cause receive reply with Term %d but current term is %d\n",
+								rf.me, reply.Term, rf.currentTerm)
+							return
+						}
+						rf.mu.Unlock()
+
+						if reply.VoteGranted {
+							rf.mu.Lock()
+							if rf.state == Candidate {
+								rf.votes++
+								DPrintf("-------server %d got vote from server %d now has %d votes\n", rf.me, idx, rf.votes)
+								if rf.votes > len(rf.peers)/2 {
+									DPrintf("%d win election\n", rf.me)
+									DPrintf("sending true in win channel\n")
+									if rf.state == Candidate {
+										rf.state = Leader
+										rf.winElectionCh <- true
+									}
+									rf.state = Leader
+									rf.mu.Unlock()
+									wg.Done()
+									DPrintf("%d become leader.QUIT\n", rf.me)
+									return
+								}
+							} else {
+								DPrintf("-------server %d state: %v got vote from server %d \nBUT HAVE BECOME LEADER SO IGNORE IT current votes: %d\n",
+									rf.me, rf.state, idx, rf.votes)
+							}
+							rf.mu.Unlock()
+						}
+						wg.Done()
+					}(i)
+				}
+			}
+			wg.Wait()
+		} else {
+			DPrintf("%d is no longer candidate.QUIT\n", rf.me)
+		}
+		rf.mu.Lock()
+		rf.shouldCont = 0
+		rf.mu.Unlock()
 	}
 }
 
@@ -517,17 +543,17 @@ func (rf *Raft) stopTimer() {
 }
 
 const (
-	heartBeatInterval = 150 * time.Millisecond
+	rpcTimeOut = 150 * time.Millisecond
 )
 
 func sendPeriodHeartBeat2(rf *Raft) {
 	wg := sync.WaitGroup{}
-	wg.Add(len(rf.peers) - 1)
 
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
+		wg.Add(1)
 		go func(idx int) {
 			for {
 				rf.mu.Lock()
@@ -552,7 +578,7 @@ func sendPeriodHeartBeat2(rf *Raft) {
 					}()
 
 					go func() {
-						time.Sleep(heartBeatInterval)
+						time.Sleep(rpcTimeOut)
 						c <- false
 					}()
 
@@ -582,7 +608,7 @@ func sendPeriodHeartBeat2(rf *Raft) {
 					return
 				}
 				DPrintf("leader%d heartbeat to %d finished, go sleep\n", rf.me, idx)
-				time.Sleep(heartBeatInterval)
+				time.Sleep(rpcTimeOut)
 			}
 		}(i)
 	}
@@ -640,7 +666,7 @@ L:
 			}
 			wg.Wait()
 			DPrintf("%d finish send all heartbeats.Going sleep\n", rf.me)
-			time.Sleep(heartBeatInterval)
+			time.Sleep(rpcTimeOut)
 		default:
 			rf.mu.Unlock()
 			break L
@@ -668,11 +694,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 	rf.debugFlag = true
+	rf.shouldCont = 0
 	rf.randDevice = rand.New(rand.NewSource(int64(rf.me)))
 	rf.throwrand()
 	rf.timer = time.NewTimer(rf.electionTimeout)
 	rf.winElectionCh = make(chan bool, 1)
+	rf.contCond = sync.NewCond(&rf.mu)
 
+	go sendRVRPC(rf, &rf.rvArgs)
 	DPrintf("%d's timeout: %d\n", rf.me, rf.electionTimeout)
 
 	// Your initialization code here (2A, 2B, 2C).
@@ -694,13 +723,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.votes = 1
 				rf.votedFor = rf.me
 				rf.timer.Reset(rf.electionTimeout)
-				args := &RequestVoteArgs{rf.currentTerm, rf.me, rf.log[len(rf.log)-1].CommandIndex, rf.log[len(rf.log)-1].Term}
-				rf.shouldContCh = make(chan bool, 1)
-				go sendRVRPC(rf, args)
-				rf.shouldContCh <- true
+				rf.rvArgs = RequestVoteArgs{rf.currentTerm, rf.me, rf.log[len(rf.log)-1].CommandIndex, rf.log[len(rf.log)-1].Term}
+				rf.shouldCont = 1
+				rf.contCond.Signal()
 				rf.mu.Unlock()
-
-				var res bool
 			CandiLoop:
 				for {
 					select {
@@ -710,23 +736,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						rf.currentTerm = rf.currentTerm + 1
 						rf.votes = 1
 						rf.votedFor = rf.me
-						rf.shouldContCh <- false
-						rf.shouldContCh = make(chan bool, 1)
-						args := &RequestVoteArgs{rf.currentTerm, rf.me, rf.log[len(rf.log)-1].CommandIndex, rf.log[len(rf.log)-1].Term}
-						go sendRVRPC(rf, args)
-						rf.shouldContCh <- true
+						rf.rvArgs = RequestVoteArgs{rf.currentTerm, rf.me, rf.log[len(rf.log)-1].CommandIndex, rf.log[len(rf.log)-1].Term}
+						rf.shouldCont = 1
+						rf.contCond.Signal()
 						rf.mu.Unlock()
 						rf.resetTimer()
-					case res = <-rf.winElectionCh:
+					case res := <-rf.winElectionCh:
 						DPrintf("%d got %v from winChannel\n", rf.me, res)
-						rf.shouldContCh <- false
 						if res {
 							//赢得选举
 							rf.becomeLeader()
 							rf.stopTimer()
 							break CandiLoop
 						} else {
-							//收到有高term的leader的AE RPC
+							//收到有高term的leader的AE 或者 RV
 							//rf.backToFollower()
 							//rf.resetTimer()
 							break CandiLoop
@@ -757,7 +780,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 	return rf
 
 }
