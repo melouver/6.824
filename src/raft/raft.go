@@ -304,8 +304,8 @@ func (a *AppendEntryArgs) String() string {
 type AppendEntryReply struct {
 	Term    int
 	Success bool
-	ConflictTerm int
-	ConflictFirstIdx int
+	ConflictEntryTerm int//the term of the conflicting entry
+	ConflictTermFirstIdx int// the first index it stores for that term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
@@ -335,9 +335,6 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	} else {
 		//DPrintf("%d got AE RPC, reset timer.\n", rf.me)
 	}
-
-
-
 
 	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		rf.timer.Reset(rf.electionTimeout)
@@ -394,6 +391,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		} else {
 			rf.commitIndex = idxOfLastNewEntry
 		}
+		rf.applyCond.Signal()
 	}
 	if len(args.Entries) != 0 {
 		DPrintf("%d after append, commitIdx = %d", rf.me, rf.commitIndex)
@@ -1062,6 +1060,7 @@ func advanceCommitIdx(rf *Raft) {
 			// Leader's matchIndex won't update, so iff >= len/2 ,then should be treated as committed
 			if maj >= len(rf.peers)/2 {
 				rf.commitIndex = i
+				rf.applyCond.Signal()
 				DPrintf("leader%d commitIndex advance to %d\n", rf.me, i)
 				break
 			}
@@ -1198,15 +1197,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-const (
-	applyInterval = time.Millisecond * 100
-)
+
 
 func applyLoop(rf *Raft) {
 	for {
-		time.Sleep(applyInterval)
-
 		rf.mu.Lock()
+		for rf.commitIndex <= rf.lastApplied {
+			rf.applyCond.Wait()
+		}
+
 		for rf.commitIndex > rf.lastApplied {
 			rf.lastApplied++
 
