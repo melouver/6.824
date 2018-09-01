@@ -234,7 +234,20 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		}
 		DPrintf("%d reset timer in %s from %d", rf.me, t, args.LeaderId)
 		reply.Success = false
+		i := len(rf.log) - 1
+		if args.PrevLogIndex >= len(rf.log) {
+			reply.ConflictTermFirstIdx = len(rf.log)
+			reply.ConflictEntryTerm = -1
+		} else {
+			reply.ConflictEntryTerm = rf.log[args.PrevLogIndex].Term
+			i = args.PrevLogIndex
+			for rf.log[i].Term == reply.ConflictEntryTerm {
+				i--
+			}
+			reply.ConflictTermFirstIdx = i + 1
+		}
 		DPrintf("AE from %d to %d failed.Reason: log doesn't contain any entry at prevLogIndex whose term matches prevLogTerm. Arg is %v rf.log is %v", args.LeaderId, rf.me, args, rf.log)
+		DPrintf("Reply conflict term:%d idx:%d", reply.ConflictEntryTerm, reply.ConflictTermFirstIdx)
 		return
 	}
 	if len(args.Entries) != 0 {
@@ -659,8 +672,23 @@ func sendAE(rf *Raft) {
 						continue
 					} else {
 						rf.mu.Lock()
-						rf.nextIndex[idx]--
-						DPrintf("leader%d to %d nextIndex dec to %d",rf.me, idx, rf.nextIndex[idx])
+						//rf.nextIndex[idx]--
+						confTerm := reply.ConflictEntryTerm
+						res := len(rf.log) - 1
+						for ; res >= 0 && rf.log[res].Term >= confTerm; res-- {
+							if rf.log[res].Term == confTerm {
+								res++
+								DPrintf("for %d leader%d find term:%d , res[%d] is %d", idx, rf.me, confTerm, idx, res)
+								break
+							}
+						}
+						if res < 0 || rf.log[res].Term < confTerm {
+							res = reply.ConflictTermFirstIdx
+							DPrintf("for %d leader%d not find term, res[%d] is %d", idx, rf.me, idx, res)
+						}
+						DPrintf("leader%d to %d nextIndex dec from %d to %d", rf.me, idx, rf.nextIndex[idx], res)
+						rf.nextIndex[idx] = res
+
 						rf.mu.Unlock()
 						continue
 					}
