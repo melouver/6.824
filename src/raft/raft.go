@@ -26,35 +26,35 @@ const (
 )
 
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	nextIndex, matchIndex []int
+	mu                       sync.Mutex          // Lock to protect shared access to this peer's state
+	peers                    []*labrpc.ClientEnd // RPC end points of all peers
+	persister                *Persister          // Object to hold this peer's persisted state
+	me                       int                 // this peer's index into peers[]
+	nextIndex, matchIndex    []int
 	commitIndex, lastApplied int
-	log         []LogEntry
-	currentTerm int
-	votedFor    int
-	votes       int
-	state       ServerState
-	applyCh         chan ApplyMsg
-	internalApplyCh chan ApplyMsg
-	debugFlag     bool
-	timer         *time.Timer
-	winElectionCh chan bool
-	shouldCont    int // 0: wait | 1: cont
-	contCond      *sync.Cond
-	shouldSendHB int
-	hbCond       *sync.Cond
-	shouldSendAE     int
-	aeCond           *sync.Cond
-	shouldAdvIdxFlag int
-	advCommitIdxCond *sync.Cond
-	applyCond *sync.Cond
-	backToFollowerCond *sync.Cond
-	randDevice      *rand.Rand
-	electionTimeout time.Duration
-	rvArgs          RequestVoteArgs
+	log                      []LogEntry
+	currentTerm              int
+	votedFor                 int
+	votes                    int
+	state                    ServerState
+	applyCh                  chan ApplyMsg
+	internalApplyCh          chan ApplyMsg
+	debugFlag                bool
+	timer                    *time.Timer
+	winElectionCh            chan bool
+	shouldCont               int // 0: wait | 1: cont
+	contCond                 *sync.Cond
+	shouldSendHB             int
+	hbCond                   *sync.Cond
+	shouldSendAE             int
+	aeCond                   *sync.Cond
+	shouldAdvIdxFlag         int
+	advCommitIdxCond         *sync.Cond
+	applyCond                *sync.Cond
+	backToFollowerCond       *sync.Cond
+	randDevice               *rand.Rand
+	electionTimeout          time.Duration
+	rvArgs                   RequestVoteArgs
 }
 
 type LogEntry struct {
@@ -62,7 +62,7 @@ type LogEntry struct {
 	Term, CommandIndex int
 }
 
-func (l LogEntry)String() string {
+func (l LogEntry) String() string {
 	return fmt.Sprintf("idx:%d Term:%d Cmd:%v ", l.CommandIndex, l.Term, l.Command)
 }
 func (rf *Raft) GetState() (term int, isLeader bool) {
@@ -100,7 +100,7 @@ func (rf *Raft) readPersist(data []byte) {
 
 	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil ||
 		d.Decode(&log) != nil {
-			panic("decode error")
+		panic("decode error")
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
@@ -111,7 +111,6 @@ func (rf *Raft) readPersist(data []byte) {
 type RequestVoteArgs struct {
 	Term, CandidateId, LastLogIndex, LastLogTerm int
 }
-
 
 type RequestVoteReply struct {
 	Term        int
@@ -198,10 +197,10 @@ func (a *AppendEntryArgs) String() string {
 }
 
 type AppendEntryReply struct {
-	Term    int
-	Success bool
-	ConflictEntryTerm int//the term of the conflicting entry
-	ConflictTermFirstIdx int// the first index it stores for that term
+	Term                 int
+	Success              bool
+	ConflictEntryTerm    int //the term of the conflicting entry
+	ConflictTermFirstIdx int // the first index it stores for that term
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
@@ -262,7 +261,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		if rf.log[args.Entries[i].CommandIndex].Term != args.Entries[i].Term {
 			rf.log = rf.log[:args.Entries[i].CommandIndex]
 			rf.persist()
-			DPrintf("%d drop command idx:%d and following", rf.me,args.Entries[i].CommandIndex)
+			DPrintf("%d drop command idx:%d and following", rf.me, args.Entries[i].CommandIndex)
 			DPrintf("%d log now are :%v", rf.me, rf.log)
 			break
 		}
@@ -282,7 +281,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 
 	if args.LeaderCommit > rf.commitIndex {
-		idxOfLastNewEntry := args.PrevLogIndex+len(args.Entries)
+		idxOfLastNewEntry := args.PrevLogIndex + len(args.Entries)
 		if args.LeaderCommit < idxOfLastNewEntry {
 			rf.commitIndex = args.LeaderCommit
 		} else {
@@ -457,7 +456,6 @@ func sendRVRPC(rf *Raft, args *RequestVoteArgs) {
 	}
 }
 
-
 func (rf *Raft) leaderBackToFollower(reason string, rst bool) {
 	DPrintf("leader %d back to follower", rf.me)
 	if rf.state == Candidate {
@@ -529,7 +527,7 @@ func sendPeriodHeartBeat(rf *Raft) {
 					args := &AppendEntryArgs{
 						Term:         rf.currentTerm,
 						LeaderId:     rf.me,
-						PrevLogIndex: rf.nextIndex[idx]-1,
+						PrevLogIndex: rf.nextIndex[idx] - 1,
 						PrevLogTerm:  rf.log[rf.nextIndex[idx]-1].Term,
 						LeaderCommit: rf.commitIndex,
 						Entries:      []LogEntry{},
@@ -588,7 +586,7 @@ func sendPeriodHeartBeat(rf *Raft) {
 }
 
 func sendAE(rf *Raft) {
-	for i := 0; i < len(rf.peers);i++ {
+	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
@@ -659,7 +657,7 @@ func sendAE(rf *Raft) {
 					if reply.Success {
 						rf.mu.Lock()
 						DPrintf("after AE from %d to %d succ, nextIdx[%d] inc from %d to %d",
-							rf.me, idx, idx, rf.nextIndex[idx], args.PrevLogIndex + len(args.Entries) + 1)
+							rf.me, idx, idx, rf.nextIndex[idx], args.PrevLogIndex+len(args.Entries)+1)
 
 						rf.nextIndex[idx] = args.PrevLogIndex + len(args.Entries) + 1
 						rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
