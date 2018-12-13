@@ -1,14 +1,15 @@
 package raft
+
 import (
 	"bytes"
 	"labgob"
 	"sync"
 )
 import (
+	"fmt"
+	"labrpc"
 	"math/rand"
 	"time"
-	"labrpc"
-	"fmt"
 )
 
 type ApplyMsg struct {
@@ -32,7 +33,7 @@ type Raft struct {
 	me                       int                 // this peer's index into peers[]
 	nextIndex, matchIndex    []int
 	commitIndex, lastApplied int
-	log                      []LogEntry
+	log                      logs
 	currentTerm              int
 	votedFor                 int
 	votes                    int
@@ -65,6 +66,17 @@ type LogEntry struct {
 func (l LogEntry) String() string {
 	return fmt.Sprintf("idx:%d Term:%d Cmd:%v ", l.CommandIndex, l.Term, l.Command)
 }
+
+type logs []LogEntry
+
+func (l logs) String() (res string) {
+	res = fmt.Sprintf("\nIdx\tTerm\tCmd\n")
+	for i := range l {
+		res += fmt.Sprintf("%d\t%d\t%d\n", l[i].CommandIndex, l[i].Term, l[i].Command)
+	}
+	return
+}
+
 func (rf *Raft) GetState() (term int, isLeader bool) {
 	rf.mu.Lock()
 	term = rf.currentTerm
@@ -88,6 +100,8 @@ func (rf *Raft) persist() {
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
+
+
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
@@ -188,7 +202,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 type AppendEntryArgs struct {
 	Term, LeaderId, PrevLogIndex, PrevLogTerm, LeaderCommit int
-	Entries                                                 []LogEntry
+	Entries                                                 logs
 }
 
 func (a *AppendEntryArgs) String() string {
@@ -249,6 +263,7 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		DPrintf("Reply conflict term:%d idx:%d", reply.ConflictEntryTerm, reply.ConflictTermFirstIdx)
 		return
 	}
+
 	if len(args.Entries) != 0 {
 		DPrintf("%d receive AE from leader%d, entries are:%v", rf.me, args.LeaderId, args.Entries)
 	}
@@ -257,7 +272,9 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 		DPrintf("%d original entries are :%v", rf.me, rf.log)
 	}
 
-	for i := 0; i < len(args.Entries) && args.Entries[i].CommandIndex <= rf.log[len(rf.log)-1].CommandIndex; i++ {
+	for i := 0;
+		i < len(args.Entries) && args.Entries[i].CommandIndex <= rf.log[len(rf.log)-1].CommandIndex;
+	i++ {
 		if rf.log[args.Entries[i].CommandIndex].Term != args.Entries[i].Term {
 			rf.log = rf.log[:args.Entries[i].CommandIndex]
 			rf.persist()
@@ -322,11 +339,12 @@ func (rf *Raft) Start(command interface{}) (index int, term int, ok bool) {
 	term = rf.currentTerm
 
 	if rf.state != Leader {
+		ok = false
 		return
 	}
 
 	if _, k := command.(int); k {
-		DPrintf("Start--%d at %d", command, rf.me)
+		DPrintf("Start--%v at %d", command, rf.me)
 	}
 
 	ok = true
@@ -473,7 +491,6 @@ func (rf *Raft) leaderBackToFollower(reason string, rst bool) {
 		DPrintf("%d reset timer.Reason:%s", rf.me, reason)
 	}
 	rf.backToFollowerCond.Signal()
-
 }
 
 func (rf *Raft) becomeCandidate() {
@@ -567,7 +584,7 @@ func sendPeriodHeartBeat(rf *Raft) {
 					if reply.Term > rf.currentTerm {
 						//DPrintf("%d back to follower cause heartbeat reply from %d term:%d, but currentTerm: %d\n", rf.me, idx, reply.Term, rf.currentTerm)
 						rf.currentTerm = reply.Term
-						rf.leaderBackToFollower(fmt.Sprintf("HB Reply from %d has high term", idx), false)
+						rf.lea√derBackToFollower(fmt.Sprintf("HB Reply from %d has high term", idx), false)
 						rf.persist()
 						rf.mu.Unlock()
 						continue
@@ -665,7 +682,6 @@ func sendAE(rf *Raft) {
 						rf.advCommitIdxCond.Signal()
 
 						DPrintf("%d AE to %d succ\n", rf.me, idx)
-
 						rf.mu.Unlock()
 						continue
 					} else {
@@ -749,7 +765,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.applyCh = applyCh
 	rf.internalApplyCh = make(chan ApplyMsg)
-	// persisten state on all servers
+	// persistent state on all servers
 	rf.currentTerm = 0
 	rf.votedFor = -1
 	rf.log = []LogEntry{}
@@ -829,6 +845,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.backToFollowerCond.Wait()
 				}
 				DPrintf("%d is no longer leader.Back to follower \n", rf.me)
+
 				rf.mu.Unlock()
 			}
 		}
@@ -840,7 +857,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func applyLoop(rf *Raft) {
-	for {
+	for ;;rf.mu.Unlock(){
 		rf.mu.Lock()
 		for rf.commitIndex <= rf.lastApplied {
 			rf.applyCond.Wait()
@@ -857,6 +874,5 @@ func applyLoop(rf *Raft) {
 			rf.applyCh <- msg
 			DPrintf("%d apply command %v at idx:%d \n", rf.me, rf.log[rf.lastApplied].Command, msg.CommandIndex)
 		}
-		rf.mu.Unlock()
 	}
 }
